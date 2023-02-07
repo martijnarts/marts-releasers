@@ -1,0 +1,70 @@
+name: Generate Changelog JSON
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+env:
+  PR_NUMBER: ${{ github.event.number }}
+  CHANGE_TITLE: ${{ github.event.pull_request.title }}
+  CHANGE_SUMMARY: $(echo "${{ github.event.pull_request.body }}" | head -n 100)
+  SEMANTIC_VERSION_TYPE: patch
+  BUILD_RUNTIME_LABEL: require-runtime-build
+  APP_STORE_REVIEW_LABEL: require-app-store-review
+
+jobs:
+  generate_changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Import GPG key
+        id: import_gpg
+        uses: crazy-max/ghaction-import-gpg@v5
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+
+      - name: Get PR labels
+        id: pr-labels
+        uses: joerick/pr-labels-action@v1.0.6
+
+      - name: Check for app store review label
+        id: check_app_store_review_label
+        if: ${{ contains(steps.pr-labels.outputs.labels, env.APP_STORE_REVIEW_LABEL) }}
+        run: |
+          echo "App store review label detected"
+          echo "SEMANTIC_VERSION_TYPE=minor" >> $GITHUB_ENV
+
+      - name: Check for build runtime label
+        id: check_build_runtime_label
+        if: ${{ contains(steps.pr-labels.outputs.labels, env.BUILD_RUNTIME_LABEL) }}
+        run: |
+          echo "Build runtime label detected"
+          echo "SEMANTIC_VERSION_TYPE=major" >> $GITHUB_ENV
+
+      - name: Generate Changelog JSON
+        run: |
+          echo '{
+            "pr_number": "${{ env.PR_NUMBER }}",
+            "change_title": "${{ env.CHANGE_TITLE }}",
+            "change_summary": "${{ env.CHANGE_SUMMARY }}",
+            "change_tags": "${{ env.CHANGE_TAGS }}"
+          }' > .changelog/draft/pr${{ env.PR_NUMBER }}.json
+
+      - name: Add & Commit
+        uses: EndBug/add-and-commit@v9.1.1
+        with:
+          add: ${{ env.CHANGELOG_FILE }}
+          default_author: github_actor
+          message: "Adding changelog"
