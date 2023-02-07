@@ -18,7 +18,7 @@ Currently, we are building tests to validate that `relez-flows` works as expecte
 
 ### Running the tests
 
-To run the tests, execute `./test`.
+To run the tests, execute `./test`. It won't work for you yet though.
 
 ## Contributions
 
