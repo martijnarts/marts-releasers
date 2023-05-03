@@ -1,0 +1,146 @@
+name: Update release branch
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  BUILD_RUNTIME_LABEL: require-runtime-build
+  APP_STORE_REVIEW_LABEL: require-app-store-review
+  USER_FACING_MAJOR_LABEL: user-facing-major
+  USER_FACING_MINOR_LABEL: user-facing-minor
+
+jobs:
+  maintain_release_branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install moreutils
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y moreutils
+
+      - name: checkout
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: checkout or create release branch
+        run: |
+          git fetch origin release && git checkout release || git checkout -b release
+
+      - name: merge main into release
+        run: |
+          git merge main
+
+      - name: find highest version from git tags
+        id: highest_version
+        run: |
+          # find the highest version tag in the repo
+          # TODO(marts): error if no tags found
+          HIGHEST_PUBLISHED_VERSION=$(git tag --sort=-v:refname | head -n 1)
+          echo "HIGHEST_PUBLISHED_VERSION=$HIGHEST_PUBLISHED_VERSION" >>$GITHUB_ENV
+
+          # parse tag comment to find user-facing version
+          git show "$HIGHEST_PUBLISHED_VERSION" |
+            grep -Eo '^user-facing-version: v[0-9]+\.[0-9]+\.[0-9]+$' |
+            sed 's/^user-facing-version: //' |
+            xargs -I{} echo "HIGHEST_PUBLISHED_USER_FACING_VERSION={}" >>$GITHUB_ENV
+
+      - name: collect all draft PRs and included changes in existing file
+        id: collect_draft_prs
+        run: |
+          # look through commits in this branch and find out if a file was created in .changelog
+          # if so, save its name to the environment. there should only be one
+          EXISTING_CHANGELOG_FILE=$(
+            git log --pretty=format: --name-only --diff-filter=A |
+              grep -E '^\.changelog/v[0-9]+\.[0-9]+\.[0-9]+\.json$' |
+              head -n 1
+          )
+
+          # if no such file exists, create a new one named .changelog/vDRAFT.json
+          if [ -z "$EXISTING_CHANGELOG_FILE" ]; then
+            EXISTING_CHANGELOG_FILE=.changelog/vDRAFT.json
+            jq -n '{
+              "version": "",
+              "userFacingVersion": "",
+              "includedChanges": [],
+            }' >.changelog/vDRAFT.json
+          fi
+
+          # read all draft changelogs into the .includedChanges array
+          NEW_PRS=$(jq -s '.' .changelog/draft/pr*.json || echo '[]')
+          jq -e '.includedChanges += $newPrs' $EXISTING_CHANGELOG_FILE --argjson newPrs "$NEW_PRS" |
+            sponge $EXISTING_CHANGELOG_FILE
+          rm .changelog/draft/pr*.json
+
+          echo "CHANGELOG_FILE=$EXISTING_CHANGELOG_FILE" >>$GITHUB_ENV
+
+      - name: calculate version increments
+        id: calculate_version_increments
+        run: |
+          VERSION_INCREMENT=$(
+            jq \
+              --arg buildRuntimeLabel "$BUILD_RUNTIME_LABEL" \
+              --arg appStoreReviewLabel "$APP_STORE_REVIEW_LABEL" \
+              '
+                if (.includedChanges | map(.changeTags) | flatten | contains([$buildRuntimeLabel]))
+                  then "major"
+                elif (.includedChanges | map(.changeTags) | flatten | contains([$appStoreReviewLabel]))
+                  then "minor"
+                else "patch"
+                end
+              ' $CHANGELOG_FILE
+          )
+          USER_FACING_VERSION_INCREMENT=$(
+            jq \
+              --arg userFacingMajor "$USER_FACING_MAJOR_LABEL" \
+              --arg userFacingMinor "$USER_FACING_MINOR_LABEL" \
+              '
+                if (.includedChanges | map(.changeTags) | flatten | contains([$userFacingMajor]))
+                  then "major"
+                elif (.includedChanges | map(.changeTags) | flatten | contains([$userFacingMinor]))
+                  then "minor"
+                else "patch"
+                end
+              ' $CHANGELOG_FILE
+          )
+
+          echo "VERSION_INCREMENT=$VERSION_INCREMENT" >>$GITHUB_ENV
+          echo "USER_FACING_VERSION_INCREMENT=$USER_FACING_VERSION_INCREMENT" >>$GITHUB_ENV
+
+      - name: increment published version and rename changelog file
+        id: increment_version
+        run: |
+          NEW_VERSION=v$(npx semver -i $VERSION_INCREMENT $HIGHEST_PUBLISHED_VERSION)
+          NEW_USER_FACING_VERSION=v$(npx semver -i $USER_FACING_VERSION_INCREMENT $HIGHEST_PUBLISHED_USER_FACING_VERSION)
+
+          mv $CHANGELOG_FILE ".changelog/$NEW_VERSION.json"
+
+          jq \
+            --arg version "$NEW_VERSION" \
+            --arg userFacingVersion "$NEW_USER_FACING_VERSION" \
+            '.version = $version | .userFacingVersion = $userFacingVersion' \
+            ".changelog/$NEW_VERSION.json" |
+            sponge ".changelog/$NEW_VERSION.json"
+
+          echo "NEW_VERSION=$NEW_VERSION" >>$GITHUB_ENV
+          echo "NEW_USER_FACING_VERSION=$NEW_USER_FACING_VERSION" >>$GITHUB_ENV
+
+      - name: Add & Commit
+        uses: EndBug/add-and-commit@v9.1.1
+        with:
+          add: ${{ env.CHANGELOG_FILE }}
+          default_author: github_actor
+          new_branch: release
+          message: "Update release branch"
+          push: true
+
+      # - name: comment PR link
+      #   uses: peter-evans/commit-comment@v2
+      #   with:
+      #     body: |
+      #       Create or show release branch PR:
+      #       https://github.com/${{ github.repository }}/compare/release...${{ github.event.pull_request.head.ref }}?expand=1

@@ -27,7 +27,7 @@ setup_file() {
     git init --initial-branch main
 
     mkdir -p .github/workflows/
-    cp -r "$BATS_TEST_DIRNAME/../.github/workflows/" .github/workflows/
+    cp -r "$BATS_TEST_DIRNAME/../../relez-flows/" .github/workflows/
     git add .
     git commit -m "Add workflows"
 

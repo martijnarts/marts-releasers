@@ -5,4 +5,4 @@ if ! [ -x "$(command -v bats)" ]; then
     exit 1
 fi
 
-bats tests/
+bats tests/unit/ "$@"
